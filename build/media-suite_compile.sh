@@ -37,6 +37,7 @@ while true; do
     --ffmpegUpdate=* ) ffmpegUpdate=${1#*=} && shift ;;
     --ffmpegPath=* ) ffmpegPath="${1#*=}"; shift ;;
     --ffmpegChoice=* ) ffmpegChoice=${1#*=} && shift ;;
+    --ffmpegKeepLegacyOpts=* ) ffmpegKeepLegacyOpts=${1#*=} && shift ;;
     --mplayer=* ) mplayer=${1#*=} && shift ;;
     --mpv=* ) mpv=${1#*=} && shift ;;
     --deleteSource=* ) deleteSource=${1#*=} && shift ;;
@@ -129,7 +130,7 @@ create_ab_ccache
 set_title "compiling global tools"
 do_simple_print -p '\n\t'"${orange}Starting $bits compilation of global tools${reset}"
 
-if [[ $bits = 32bit && $av1an != n ]]; then
+if [[ $bits = 32bit && $av1an = y ]]; then
     do_simple_print "${orange}Av1an cannot be compiled due to Vapoursynth being broken on 32-bit and will be disabled"'!'"${reset}"
     _reenable_av1an=$av1an # so that av1an can be built if both 32 bit and 64 bit targets are enabled
     av1an=n
@@ -148,7 +149,7 @@ if [[ $packing = y &&
 fi
 
 if [[ "$ripgrep|$rav1e|$dssim|$libavif|$dovitool|$hdr10plustool" = *y* ]] ||
-    [[ $av1an != n ]] || [[ $gifski != n ]] || [[ $zlib = rs ]] || enabled librav1e; then
+    [[ $av1an = y ]] || [[ $gifski != n ]] || [[ $zlib = rs ]] || enabled librav1e; then
     do_pacman_install rust
     [[ $CC =~ clang ]] && rust_target_suffix="llvm"
 fi
@@ -189,13 +190,14 @@ else
             # these macros are for some reason not set, even though they should be according to CMakeLists.txt
             local zlib_macros="-DINFLATE_CHUNK_SIMD_SSE2 -DADLER32_SIMD_SSSE3 -DINFLATE_CHUNK_READ_64LE -DCRC32_SIMD_SSE42_PCLMUL -DDEFLATE_SLIDE_HASH_SSE2 -D_LARGEFILE64_SOURCE=1 -DX86_WINDOWS"
             sed -i 's; -L${sharedlibdir};;' zlib.pc.cmakein
-            # add missing header and source files needed for compilation, and force all executables to link with static zlib
+            # add missing header and source files needed for compilation, force all executables to link with static zlib, and name libraries correctly with -DUNIX=OFF
             sed -e 's;ioapi.h;ioapi.h contrib/minizip/iowin32.c contrib/minizip/iowin32.h;' \
-                -e 's;zlib);zlibstatic);' -i CMakeLists.txt
+                -e 's;zlib);zlibstatic);' -e 's;BUILD_SHARED_LIBS AND WIN32;MINGW;' \
+                -e 's;zlib PROPERTIES SUFFIX "1.dll";zlib zlibstatic PROPERTIES OUTPUT_NAME z;' -i CMakeLists.txt
             # the win32 dir is missing, so copy the folder from original zlib
             do_wget -c -r -q "https://github.com/madler/zlib/archive/refs/heads/develop.tar.gz"
             tar --strip-components=1 -xzf develop.tar.gz zlib-develop/win32
-            do_cmakeinstall -DINSTALL_PKGCONFIG_DIR="${LOCALDESTDIR}/lib/pkgconfig" \
+            do_cmakeinstall -DUNIX=OFF -DINSTALL_PKGCONFIG_DIR="${LOCALDESTDIR}/lib/pkgconfig" \
                 -DUSE_ZLIB_RABIN_KARP_HASH=ON -DENABLE_SIMD_OPTIMIZATIONS=ON \
                 -DCMAKE_C_FLAGS="${CFLAGS} ${zlib_macros} -msse4.2 -mpclmul" "${extracommands[@]}"
             [[ $standalone = y ]] && do_install minizip_bin.exe bin-global/minizip.exe &&
@@ -328,7 +330,7 @@ if [[ $gifski != n ]]; then
             do_pacman_install clang
         fi
         PKG_CONFIG="$LOCALDESTDIR/bin/ab-pkg-config-static.bat" \
-            do_rust "${extracommands[@]}"
+            LIBCLANG_PATH="$MINGW_PREFIX/bin" do_rust "${extracommands[@]}"
         do_install "target/$CARCH-pc-windows-gnu$rust_target_suffix/release/gifski.exe" bin-global/
         do_checkIfExist
         unset extracommands
@@ -678,9 +680,8 @@ if [[ $jpegxl = y ]] || { [[ $ffmpeg != no ]] && enabled libjxl; }; then
     [[ $jpegxl = y ]] && _check+=(bin-global/{{c,d}jxl,jxlinfo}.exe)
     if do_vcs "$SOURCE_REPO_LIBJXL"; then
         do_git_submodule
-        do_patch "https://raw.githubusercontent.com/m-ab-s/mabs-patches/master/libjxl/0001-brotli-link-enc-before-common.patch" am
         do_uninstall "${_check[@]}" include/jxl bin-global/cjpegli.exe bin-global/djpegli.exe 
-        do_pacman_install asciidoc
+        do_pacman_install asciidoc openexr
         extracommands=()
         [[ $jpegxl = y ]] || extracommands=("-DJPEGXL_ENABLE_TOOLS=OFF")
         CXXFLAGS+=" -DJXL_CMS_STATIC_DEFINE -DJXL_STATIC_DEFINE -DJXL_THREADS_STATIC_DEFINE" \
@@ -725,6 +726,17 @@ else
 fi
 unset opencldll
 
+if { [[ $ffmpeg != no || $standalone = y ]] && enabled libtesseract; } ||
+    ! mpv_disabled libarchive; then
+    do_pacman_install libarchive
+    # need to fixup libarchive.pc
+    grep_and_sed libiconv.dll.a "$MINGW_PREFIX/lib/pkgconfig/libarchive.pc" \
+        '/Libs/{
+            s| -L'"${MINGW_PREFIX}"'/lib||g
+            s|'"${MINGW_PREFIX}"'/lib/lib(.+)\.dll\.a|-l\1|g
+        }'
+fi
+
 if [[ $ffmpeg != no || $standalone = y ]] && enabled libtesseract; then
     do_pacman_remove tesseract-ocr
     _check=(libleptonica.{,l}a lept.pc)
@@ -735,7 +747,7 @@ if [[ $ffmpeg != no || $standalone = y ]] && enabled libtesseract; then
         do_checkIfExist
     fi
 
-    do_pacman_install libarchive pango asciidoc
+    do_pacman_install pango asciidoc
     _check=(libtesseract.{,l}a tesseract.pc)
     if do_vcs "$SOURCE_REPO_TESSERACT"; then
         do_pacman_install docbook-xsl omp
@@ -1042,9 +1054,8 @@ if [[ $standalone = y ]] && enabled libmp3lame; then
 fi
 
 _check=(libgme.{a,pc})
-if [[ $ffmpeg != no ]] && enabled libgme && do_pkgConfig "libgme = 0.6.3" &&
-    do_wget -h aba34e53ef0ec6a34b58b84e28bf8cfbccee6585cebca25333604c35db3e051d \
-        "https://bitbucket.org/mpyne/game-music-emu/downloads/game-music-emu-0.6.3.tar.xz"; then
+if [[ $ffmpeg != no ]] && enabled libgme &&
+    do_vcs "$SOURCE_REPO_LIBGME"; then
     do_uninstall include/gme "${_check[@]}"
     do_cmakeinstall -DENABLE_UBSAN=OFF
     do_checkIfExist
@@ -1162,6 +1173,7 @@ if { { [[ $ffmpeg != no ]] &&
     do_vcs "$SOURCE_REPO_OPENAL"; then
     do_uninstall "${_check[@]}"
     do_patch "https://raw.githubusercontent.com/m-ab-s/mabs-patches/master/openal-soft/0001-CMake-Fix-issues-for-mingw-w64.patch" am
+    do_patch "https://raw.githubusercontent.com/m-ab-s/mabs-patches/master/openal-soft/0003-CMake-include-gsl-include-for-main-lib-too.patch" am
     CC=${CC/ccache /}.bat CXX=${CXX/ccache /}.bat \
         do_cmakeinstall -DLIBTYPE=STATIC -DALSOFT_UTILS=OFF -DALSOFT_EXAMPLES=OFF
     sed -i 's/Libs.private.*/& -luuid -lole32/' "$LOCALDESTDIR/lib/pkgconfig/openal.pc" # uuid is for FOLDERID_* stuff
@@ -1180,6 +1192,33 @@ if [[ $ffmpeg != no ]] && enabled liblc3 &&
         do_mesoninstall audio
     fi
     do_checkIfExist
+fi
+
+_check=(bin/atw_ldwrapper libAudioToolboxWrapper.a)
+if [[ $ffmpeg != no ]] && enabled audiotoolbox; then
+    _qtfiles_url="https://github.com/AnimMouse/QTFiles/releases/download/v12.10.11"
+    _deps=(bin-video/{ASL,CoreAudioToolbox,CoreFoundation,icudt62,libdispatch,libicuin,libicuuc,objc}.dll)
+    if ! files_exist "${_deps[@]}"; then
+        if [[ $build64 = yes ]]; then
+            do_wget -r -q -h 32fcd058936410f7eabd3b55a8931bce5f45bb7892d6a2c65387820daca52f58 \
+                "${_qtfiles_url}/QTfiles64.7z"
+            do_install *.dll bin-video
+            rm -rf ../QTfiles64/
+        fi
+        if [[ $build32 = yes ]]; then
+            do_wget -r -q -h c6c582fe1af4e0c2b1eb7c141ad929a81f14d123aedd3b16df8226c104fb3028 \
+                "${_qtfiles_url}/QTfiles.7z"
+            do_install *.dll bin-video
+            rm -rf ../QTfiles/
+        fi
+    fi
+
+    if do_vcs "$SOURCE_REPO_AUDIOTOOLBOX"; then
+        do_uninstall "${_check[@]}"
+        do_cmakeinstall
+        do_checkIfExist
+    fi
+    unset _qtfiles_url
 fi
 
 if [[ $exitearly = EE4 ]]; then
@@ -1218,12 +1257,12 @@ if { [[ $rtmpdump = y ]] ||
 fi
 
 _check=(libvpx.a vpx.pc)
-[[ $standalone = y || $av1an != n ]] && _check+=(bin-video/vpxenc.exe)
+[[ $standalone = y || $av1an = y ]] && _check+=(bin-video/vpxenc.exe)
 if { enabled libvpx || [[ $vpx = y ]]; } && do_vcs "$SOURCE_REPO_VPX" vpx; then
     do_pacman_install yasm
     extracommands=()
     [[ -f config.mk ]] && log "distclean" make distclean
-    [[ $standalone = y || $av1an != n ]] && _check+=(bin-video/vpxdec.exe) ||
+    [[ $standalone = y || $av1an = y ]] && _check+=(bin-video/vpxdec.exe) ||
         extracommands+=(--disable-{examples,webm-io,libyuv,postproc})
     do_uninstall include/vpx "${_check[@]}"
     # Work around for semaphore.h not having struct _timespec64 info
@@ -1239,7 +1278,7 @@ if { enabled libvpx || [[ $vpx = y ]]; } && do_vcs "$SOURCE_REPO_VPX" vpx; then
     sed -i 's;HAVE_GNU_STRIP=yes;HAVE_GNU_STRIP=no;' -- ./*.mk
     do_make
     do_makeinstall
-    [[ $standalone = y || $av1an != n ]] && do_install vpx{enc,dec}.exe bin-video/
+    [[ $standalone = y || $av1an = y ]] && do_install vpx{enc,dec}.exe bin-video/
     do_checkIfExist
     unset extracommands
 else
@@ -1259,12 +1298,13 @@ fi
 file_installed -s libvmaf.dll.a && rm "$(file_installed libvmaf.dll.a)"
 
 _check=(libaom.a aom.pc)
-[[ $aom = y || $standalone = y || $av1an != n ]] && _check+=(bin-video/aom{dec,enc}.exe)
+[[ $aom = y || $standalone = y || $av1an = y ]] && _check+=(bin-video/aom{dec,enc}.exe)
 if { [[ $aom = y ]] || [[ $libavif = y ]] || { [[ $ffmpeg != no ]] && enabled libaom; }; } &&
     do_vcs "$SOURCE_REPO_LIBAOM"; then
     do_pacman_install yasm
-    extracommands=()
-    if [[ $aom = y || $standalone = y || $av1an != n ]]; then
+    do_patch "https://raw.githubusercontent.com/m-ab-s/mabs-patches/master/aom/0001-CMake-Add-ENABLE_EXTRA_EXAMPLES.patch" am
+    extracommands=("-DENABLE_EXTRA_EXAMPLES=off")
+    if [[ $aom = y || $standalone = y || $av1an = y ]]; then
         # fix google's shit
         sed -ri 's;_PREFIX.+CMAKE_INSTALL_BINDIR;_FULL_BINDIR;' \
             build/cmake/aom_install.cmake
@@ -1292,7 +1332,7 @@ if { [[ $dav1d = y ]] || [[ $libavif = y ]] || { [[ $ffmpeg != no ]] && enabled 
 fi
 
 _check=()
-{ [[ $rav1e = y ]] || [[ $av1an != n ]] ||
+{ [[ $rav1e = y ]] || [[ $av1an = y ]] ||
     { enabled librav1e && [[ $standalone = y ]]; } } &&
     _check+=(bin-video/rav1e.exe)
 { enabled librav1e || [[ $libavif = y ]]; } && _check+=(librav1e.a rav1e.pc rav1e/rav1e.h)
@@ -1314,7 +1354,7 @@ if { [[ $rav1e = y ]] || [[ $libavif = y ]] || enabled librav1e; } &&
     unset _libgit2_pc
 
     # standalone binary
-    if [[ $rav1e = y || $standalone = y || $av1an != n ]]; then
+    if [[ $rav1e = y || $standalone = y || $av1an = y ]]; then
         do_rust --profile release-no-lto
         find "target/$CARCH-pc-windows-gnu$rust_target_suffix" -name "rav1e.exe" | while read -r f; do
             do_install "$f" bin-video/
@@ -1403,27 +1443,25 @@ if { { [[ $ffmpeg != no ]] &&
     do_checkIfExist
 fi
 
-_check=(libdvdread.{,l}a dvdread.pc)
+_check=(libdvdread.a dvdread.pc)
 if { { [[ $ffmpeg != no ]] && enabled_any libdvdread libdvdnav; } ||
     [[ $mplayer = y ]] || mpv_enabled dvdnav; } &&
     do_vcs "$SOURCE_REPO_LIBDVDREAD" dvdread; then
-    do_autoreconf
     do_uninstall include/dvdread "${_check[@]}"
-    do_separate_confmakeinstall
+    do_mesoninstall
     do_checkIfExist
 fi
-[[ -f $LOCALDESTDIR/lib/pkgconfig/dvdread.pc ]] &&
-    grep_or_sed "Libs.private" "$LOCALDESTDIR"/lib/pkgconfig/dvdread.pc \
-        "/Libs:/ a\Libs.private: -ldl -lpsapi"
+# [[ -f $LOCALDESTDIR/lib/pkgconfig/dvdread.pc ]] &&
+#     grep_or_sed "Libs.private" "$LOCALDESTDIR"/lib/pkgconfig/dvdread.pc \
+#         "/Libs:/ a\Libs.private: -ldl -lpsapi"
 
-_check=(libdvdnav.{,l}a dvdnav.pc)
+_check=(libdvdnav.a dvdnav.pc)
 _deps=(libdvdread.a)
 if { { [[ $ffmpeg != no ]] && enabled libdvdnav; } ||
     [[ $mplayer = y ]] || mpv_enabled dvdnav; } &&
     do_vcs "$SOURCE_REPO_LIBDVDNAV" dvdnav; then
-    do_autoreconf
     do_uninstall include/dvdnav "${_check[@]}"
-    do_separate_confmakeinstall
+    do_mesoninstall
     do_checkIfExist
 fi
 
@@ -1458,13 +1496,12 @@ if { [[ $ffmpeg != no ]] && enabled libbluray; } || ! mpv_disabled libbluray; th
     fi
 fi
 
-_check=(libbluray.{{,l}a,pc})
+_check=(libbluray.{a,pc})
 if { { [[ $ffmpeg != no ]] && enabled libbluray; } || ! mpv_disabled libbluray; } &&
     do_vcs "$SOURCE_REPO_LIBBLURAY"; then
     [[ -f contrib/libudfread/.git ]] || do_git_submodule
     do_patch "https://raw.githubusercontent.com/m-ab-s/mabs-patches/master/libbluray/0001-dec-prefix-with-libbluray-for-now.patch" am
-    do_autoreconf
-    do_uninstall include/libbluray share/java "${_check[@]}"
+    do_uninstall include/libbluray share/java "${_check[@]}" libbluray.la
     sed -i 's|__declspec(dllexport)||g' jni/win32/jni_md.h
     extracommands=()
     log javahome get_java_home
@@ -1485,16 +1522,16 @@ if { { [[ $ffmpeg != no ]] && enabled libbluray; } || ! mpv_disabled libbluray; 
         export JDK_HOME=''
         export JAVA_HOME
     else
-        extracommands+=(--disable-bdjava-jar)
+        extracommands+=(-Dbdj_jar=disabled)
     fi
-    if enabled libxml2; then
-        sed -ri 's;(Cflags.*);\1 -DLIBXML_STATIC;' src/libbluray.pc.in
-    else
-        extracommands+=(--without-libxml2)
+    if ! enabled libxml2; then
+        extracommands+=(-Dlibxml2=disabled)
     fi
     CFLAGS+=" $(enabled libxml2 && echo "-DLIBXML_STATIC")" \
-        do_separate_confmakeinstall --disable-{examples,doxygen-doc} \
-        --without-{fontconfig,freetype} "${extracommands[@]}"
+        do_mesoninstall -Dfontconfig=disabled -Dfreetype=disabled "${extracommands[@]}"
+    if enabled libxml2; then
+        sed -ri 's;(Cflags.*);\1 -DLIBXML_STATIC;' $LOCALDESTDIR/lib/pkgconfig/libbluray.pc
+    fi
     do_checkIfExist
     PATH=$OLD_PATH
     unset extracommands JDK_HOME JAVA_HOME OLD_PATH
@@ -1744,7 +1781,7 @@ fi
 if [[ $x264 != no ]] ||
     { [[ $ffmpeg != no ]] && enabled libx264; }; then
     _check=(x264{,_config}.h libx264.a x264.pc)
-    [[ $standalone = y || $av1an != n ]] && _check+=(bin-video/x264.exe)
+    [[ $standalone = y || $av1an = y ]] && _check+=(bin-video/x264.exe)
     _bitdepth=$(get_api_version x264_config.h BIT_DEPTH)
     if do_vcs "$SOURCE_REPO_X264" ||
         [[ $x264 = o8   && $_bitdepth =~ (0|10) ]] ||
@@ -1758,9 +1795,9 @@ if [[ $x264 != no ]] ||
         old_PKG_CONFIG_PATH=$PKG_CONFIG_PATH
         PKG_CONFIG_PATH=$LOCALDESTDIR/opt/lightffmpeg/lib/pkgconfig:$MINGW_PREFIX/lib/pkgconfig
         unset_extra_script
-        if [[ $standalone = y || $av1an != n ]] && [[ $x264 =~ (full|fullv) ]]; then
+        if [[ $standalone = y || $av1an = y ]] && [[ $x264 =~ (full|fullv) ]]; then
             _check=("$LOCALDESTDIR"/opt/lightffmpeg/lib/pkgconfig/libav{codec,format}.pc)
-            do_vcs "$ffmpegPath"
+            do_vcs "$ffmpegPath" ffmpeg
             do_uninstall "$LOCALDESTDIR"/opt/lightffmpeg
             [[ -f config.mak ]] && log "distclean" make distclean
             create_build_dir light
@@ -1791,7 +1828,6 @@ if [[ $x264 != no ]] ||
             if do_vcs "$SOURCE_REPO_FFMS2"; then
                 do_uninstall "${_check[@]}"
                 sed -i 's/Cflags.*/& -DFFMS_STATIC/' ffms2.pc.in
-                do_patch "https://raw.githubusercontent.com/m-ab-s/mabs-patches/master/ffms2/0001-ffmsindex-fix-linking-issues.patch" am
                 mkdir -p src/config
                 do_autoreconf
                 do_separate_confmakeinstall video --prefix="$LOCALDESTDIR/opt/lightffmpeg"
@@ -1802,7 +1838,7 @@ if [[ $x264 != no ]] ||
             extracommands+=(--disable-lavf --disable-ffms)
         fi
 
-        if [[ $standalone = y || $av1an != n ]]; then
+        if [[ $standalone = y || $av1an = y ]]; then
             _check=("$LOCALDESTDIR/opt/lightffmpeg/lib/pkgconfig/liblsmash.pc")
             if do_vcs "$SOURCE_REPO_LIBLSMASH" liblsmash; then
                 [[ -f config.mak ]] && log "distclean" make distclean
@@ -1818,7 +1854,7 @@ if [[ $x264 != no ]] ||
         fi
 
         _check=(x264{,_config}.h x264.pc)
-        [[ $standalone = y || $av1an != n ]] && _check+=(bin-video/x264.exe)
+        [[ $standalone = y || $av1an = y ]] && _check+=(bin-video/x264.exe)
         [[ -f config.h ]] && log "distclean" make distclean
 
         x264_build=$(grep ' X264_BUILD ' x264.h | cut -d' ' -f3)
@@ -1855,7 +1891,7 @@ else
 fi
 
 _check=(x265{,_config}.h libx265.a x265.pc)
-[[ $standalone = y || $av1an != n ]] && _check+=(bin-video/x265.exe)
+[[ $standalone = y || $av1an = y ]] && _check+=(bin-video/x265.exe)
 if [[ ! $x265 = n ]] && do_vcs "$SOURCE_REPO_X265"; then
     grep_and_sed CMAKE_CXX_IMPLICIT_LINK_LIBRARIES source/CMakeLists.txt 's|\$\{CMAKE_CXX_IMPLICIT_LINK_LIBRARIES\}||g'
     grep_or_sed cstdint source/dynamicHDR10/json11/json11.cpp "/cstdlib/ i\#include <cstdint>"
@@ -1880,7 +1916,7 @@ if [[ ! $x265 = n ]] && do_vcs "$SOURCE_REPO_X265"; then
         extra_script post cmake
         do_ninja
     }
-    [[ $standalone = y || $av1an != n ]] && cli=-DENABLE_CLI=ON
+    [[ $standalone = y || $av1an = y ]] && cli=-DENABLE_CLI=ON
 
     if [[ $x265 =~ (o12|s|d|y) ]]; then
         cd_safe "$build_root/12bit"
@@ -1931,7 +1967,7 @@ EOF
     }
     build_x265
     cpuCount=1 log "install" ninja install
-    if [[ $standalone = y || $av1an != n ]] && [[ $x265 = d ]]; then
+    if [[ $standalone = y || $av1an = y ]] && [[ $x265 = d ]]; then
         cd_safe "$(get_first_subdir -f)"
         do_uninstall bin-video/x265-numa.exe
         do_print_progress "Building NUMA version of binary"
@@ -2010,7 +2046,7 @@ _vapoursynth_install() {
     do_pacman_install tools-git
     _python_ver=3.12.10
     _python_lib=python312
-    _vsver=70
+    _vsver=72
     _check=("lib$_python_lib.a")
     if files_exist "${_check[@]}"; then
         do_print_status "python $_python_ver" "$green" "Up-to-date"
@@ -2029,8 +2065,8 @@ _vapoursynth_install() {
         do_install sdk/include/vapoursynth/*.h include/vapoursynth/
 
         # Extract the .dll from the pip wheel
-        log "7z" 7z e -y -aoa wheel/VapourSynth-$_vsver-cp${_python_lib:6:3}-cp${_python_lib:6:3}-win_amd64.whl \
-            VapourSynth-$_vsver.data/data/Lib/site-packages/vapoursynth.dll
+        log "7z" 7z e -y -aoa wheel/vapoursynth-$_vsver-cp${_python_lib:6:3}-abi3-win_amd64.whl \
+            vapoursynth-$_vsver.data/data/Lib/site-packages/vapoursynth.dll
 
         create_build_dir
         declare -A _pc_vars=(
@@ -2068,59 +2104,25 @@ _vapoursynth_install() {
     unset _file _python_lib _python_ver _vsver _pc_vars
     return 0
 }
-if ! { { ! mpv_disabled vapoursynth || enabled vapoursynth || [[ $av1an != n ]]; } && _vapoursynth_install; }; then
+if ! { { ! mpv_disabled vapoursynth || enabled vapoursynth || [[ $av1an = y ]]; } && _vapoursynth_install; }; then
     mpv_disable vapoursynth
     do_removeOption --enable-vapoursynth
 fi
 
-if [[ $av1an != n ]]; then
-    local av1an_bindir="bin-video"
-    local av1an_ffmpeg_prefix="opt/av1anffmpeg"
-    [[ $av1an = shared ]] && av1an_bindir="bin-video/av1an/bin" && av1an_ffmpeg_prefix="bin-video/av1an"
-
-    _check=("$LOCALDESTDIR"/"$av1an_ffmpeg_prefix"/lib/pkgconfig/lib{av{codec,device,filter,format,util},swscale}.pc)
-    if flavor=av1an do_vcs "https://git.ffmpeg.org/ffmpeg.git#branch=release/7.1"; then
-        do_uninstall "$LOCALDESTDIR"/"$av1an_ffmpeg_prefix"
-        [[ -f config.mak ]] && log "distclean" make distclean
-        local av1an_ffmpeg_opts=("--enable-static" "--disable-shared")
-        [[ $av1an = shared ]] && av1an_ffmpeg_opts=("--disable-static" "--enable-shared")
-        # compile ffmpeg executable if ffmpeg is disabled so av1an can function
-        if [[ $ffmpeg != no ]]; then
-            av1an_ffmpeg_opts+=("--disable-programs")
-        else
-            # enable filters too so they can be used with av1an
-            av1an_ffmpeg_opts+=("--disable-ffprobe" "--disable-ffplay" "--enable-filters")
-        fi
-        create_build_dir av1an
-        config_path=.. do_configure "${FFMPEG_BASE_OPTS[@]}" \
-            --prefix="$LOCALDESTDIR/$av1an_ffmpeg_prefix" \
-            --disable-autodetect --disable-everything \
-            --disable-{debug,doc,network} \
-            --enable-{decoders,demuxers,protocols} \
-            "${av1an_ffmpeg_opts[@]}"
-        do_make && do_makeinstall
-        # move static ffmpeg to a reasonable location if ffmpeg is disabled
-        [[ $av1an != shared ]] && [[ $ffmpeg = no ]] && [[ ! -f "$LOCALDESTDIR"/bin-video/ffmpeg.exe ]] &&
-            mv -f "$LOCALDESTDIR"/{"$av1an_ffmpeg_prefix"/bin,bin-video}/ffmpeg.exe
-        files_exist "${_check[@]}" && touch ../"build_successful${bits}_av1an"
-        unset av1an_ffmpeg_opts
+if [[ $av1an = y ]]; then
+    if [[ $ffmpeg = no ]] &&
+        [[ ! -f "$LOCALDESTDIR"/bin-video/ffmpeg.exe && ! -f "$LOCALDESTDIR"/bin-video/ffprobe.exe ]]; then
+        do_simple_print "${orange}Av1an requires both ffmpeg.exe and ffprobe.exe to run.${reset}"
+        do_simple_print "${orange}Consider enabling ffmpeg in media-autobuild_suite.ini"'!'"${reset}"
     fi
 
-    old_PKG_CONFIG_PATH=$PKG_CONFIG_PATH
-    PKG_CONFIG_PATH=$LOCALDESTDIR/$av1an_ffmpeg_prefix/lib/pkgconfig:$PKG_CONFIG_PATH
-
-    _check=("$av1an_bindir"/av1an.exe)
+    _check=(bin-video/av1an.exe)
     if do_vcs "$SOURCE_REPO_AV1AN"; then
         do_uninstall "${_check[@]}"
-        do_pacman_install clang
-        PKG_CONFIG="$LOCALDESTDIR/bin/ab-pkg-config-static.bat" \
-            VAPOURSYNTH_LIB_DIR="$LOCALDESTDIR/lib" do_rust
-        do_install "target/$CARCH-pc-windows-gnu$rust_target_suffix/release/av1an.exe" $av1an_bindir/
+        VAPOURSYNTH_LIB_DIR="$LOCALDESTDIR/lib" do_rust
+        do_install "target/$CARCH-pc-windows-gnu$rust_target_suffix/release/av1an.exe" bin-video/
         do_checkIfExist
     fi
-
-    PKG_CONFIG_PATH=$old_PKG_CONFIG_PATH
-    unset old_PKG_CONFIG_PATH av1an_{bindir,ffmpeg_prefix}
 fi
 
 if [[ $ffmpeg != no ]] && enabled liblensfun; then
@@ -2196,33 +2198,37 @@ else
     pc_exists libvvdec || do_removeOption "--enable-libvvdec"
 fi
 
-_check=(bin-video/xeve_app.exe xeve/xeve{,_exports}.h libxeve.a xeve.pc)
+_check=(bin-video/xeve_app.exe xeve/xeve{,_exports}.h xeve/libxeve.a xeve.pc)
 if [[ $ffmpeg != no ]] && enabled libxeve &&
     do_vcs "$SOURCE_REPO_XEVE"; then
     do_uninstall bin-video/libxeve.dll lib/libxeve.dll.a.dyn "${_check[@]}"
     sed -i 's/-Werror //' CMakeLists.txt
-    do_cmakeinstall video
-    # no way to disable shared lib building in cmake
-    # move the static library out from subfolder to make ffmpeg configure find it easier
-    mv -f "$LOCALDESTDIR"/lib/xeve/libxeve.a "$LOCALDESTDIR"/lib/libxeve.a
+    do_cmakeinstall video # no way to disable shared lib building in cmake
     mv -f "$LOCALDESTDIR"/lib/libxeve.dll.a "$LOCALDESTDIR"/lib/libxeve.dll.a.dyn
-    # delete the now empty subfolder
-    rmdir "$LOCALDESTDIR/lib/xeve" > /dev/null 2>&1
+    # patch the lib path to actual subdirectory it installed to
+    sed -i 's|Libs: -L${libdir} -lxeve|Libs: -L${libdir}/xeve -lxeve|' "$LOCALDESTDIR"/lib/pkgconfig/xeve.pc
     do_checkIfExist
 fi
 
-_check=(bin-video/xevd_app.exe xevd/xevd{,_exports}.h libxevd.a xevd.pc)
+_check=(bin-video/xevd_app.exe xevd/xevd{,_exports}.h xevd/libxevd.a xevd.pc)
 if [[ $ffmpeg != no ]] && enabled libxevd &&
     do_vcs "$SOURCE_REPO_XEVD"; then
     do_uninstall bin-video/libxevd.dll lib/libxevd.dll.a.dyn "${_check[@]}"
     sed -i 's/-Werror //' CMakeLists.txt
-    do_cmakeinstall video
-    # no way to disable shared lib building in cmake
-    # move the static library out from subfolder to make ffmpeg configure find it easier
-    mv -f "$LOCALDESTDIR"/lib/xevd/libxevd.a "$LOCALDESTDIR"/lib/libxevd.a
+    do_cmakeinstall video # no way to disable shared lib building in cmake
     mv -f "$LOCALDESTDIR"/lib/libxevd.dll.a "$LOCALDESTDIR"/lib/libxevd.dll.a.dyn
-    # delete the now empty subfolder
-    rmdir "$LOCALDESTDIR/lib/xevd" > /dev/null 2>&1
+    # patch the lib path to actual subdirectory it installed to
+    sed -i 's|Libs: -L${libdir} -lxevd|Libs: -L${libdir}/xevd -lxevd|' "$LOCALDESTDIR"/lib/pkgconfig/xevd.pc
+    do_checkIfExist
+fi
+
+_check=(bin-video/oapv_app_{enc,dec}.exe oapv/oapv.h oapv/liboapv.a oapv.pc)
+if [[ $ffmpeg != no ]] && enabled liboapv &&
+    do_vcs "$SOURCE_REPO_OPENAPV"; then
+    do_uninstall "${_check[@]}"
+    do_cmakeinstall video -DOAPV_BUILD_SHARED_LIB=OFF
+    # patch the lib path to actual subdirectory it installed to
+    sed -i 's|Libs: -L${libdir} -loapv|Libs: -L${libdir}/oapv -loapv|' "$LOCALDESTDIR"/lib/pkgconfig/oapv.pc
     do_checkIfExist
 fi
 
@@ -2426,7 +2432,7 @@ if [[ $ffmpeg != no ]]; then
 
     do_hide_all_sharedlibs
 
-    _check=(libavutil.pc)
+    _check=(libav{util,codec}.pc)
     disabled_any avfilter ffmpeg || _check+=(bin-video/ffmpeg.exe)
     if [[ $ffmpeg =~ shared ]]; then
         _check+=(libavutil.dll.a)
@@ -2439,7 +2445,7 @@ if [[ $ffmpeg != no ]]; then
         _deps=(lib{aom,tesseract,vmaf,x265,vpx}.a)
     [[ $ffmpegUpdate = y ]] && enabled zlib &&
         _deps+=("$zlib_dir"/lib/libz.a)
-    if do_vcs "$ffmpegPath"; then
+    if do_vcs "$ffmpegPath" ffmpeg; then
         ff_base_commit=$(git rev-parse HEAD)
         do_changeFFmpegConfig "$license"
         [[ -f ffmpeg_extra.sh ]] && source ffmpeg_extra.sh
@@ -2455,15 +2461,17 @@ if [[ $ffmpeg != no ]]; then
             do_patch "https://raw.githubusercontent.com/OpenVisualCloud/SVT-VP9/master/ffmpeg_plugin/master-0001-Add-ability-for-ffmpeg-to-run-svt-vp9.patch" am ||
                 do_removeOption --enable-libsvtvp9
         fi
-        if enabled libsvtav1; then
-            do_patch "https://code.ffmpeg.org/FFmpeg/FFmpeg/pulls/12.patch" am
-        fi
 
         enabled libsvthevc || do_removeOption FFMPEG_OPTS_SHARED "--enable-libsvthevc"
         enabled libsvtav1 || do_removeOption FFMPEG_OPTS_SHARED "--enable-libsvtav1"
         enabled libsvtvp9 || do_removeOption FFMPEG_OPTS_SHARED "--enable-libsvtvp9"
 
         enabled libvvdec && grep_and_sed FF_PROFILE libavcodec/libvvdec.c 's/FF_PROFILE/AV_PROFILE/g'
+
+        # Bypass ffmpeg check for audiotoolbox
+        enabled audiotoolbox && do_addOption --extra-libs=-lAudioToolboxWrapper && do_addOption --disable-outdev=audiotoolbox &&
+            do_addOption FFMPEG_OPTS_SHARED --extra-libs=-lAudioToolboxWrapper && do_addOption FFMPEG_OPTS_SHARED --disable-outdev=audiotoolbox &&
+            sed -ri "s/enabled audiotoolbox && check_apple_framework.*/enable audiotoolbox/g" configure
 
         if enabled openal &&
             pc_exists "openal"; then
@@ -2484,8 +2492,10 @@ if [[ $ffmpeg != no ]]; then
         fi
 
         _patches=$(git rev-list $ff_base_commit.. --count)
-        [[ $_patches -gt 0 ]] &&
+        if [[ $_patches -gt 0 ]]; then
             do_addOption "--extra-version=g$(git rev-parse --short $ff_base_commit)+$_patches"
+            do_addOption FFMPEG_OPTS_SHARED "--extra-version=g$(git rev-parse --short $ff_base_commit)+$_patches"
+        fi
 
         _uninstall=(include/libav{codec,device,filter,format,util,resample}
             include/lib{sw{scale,resample},postproc}
@@ -2568,6 +2578,9 @@ if [[ $ffmpeg != no ]]; then
             create_winpty_exe ffmpeg "$LOCALDESTDIR"/bin-video/
         unset ffmpeg_cflags build_suffix
     fi
+    # Fix linking to audiotoolboxwrapper
+    enabled audiotoolbox && grep_or_sed "AudioToolboxWrapper" "$LOCALDESTDIR"/lib/pkgconfig/libavcodec.pc \
+        's/(Libs: .*)/\1 -lAudioToolboxWrapper -lshlwapi -lshell32/'
 fi
 
 _check=(libde265.a)
@@ -2593,7 +2606,7 @@ if [[ $libheif != n ]] &&
     do_patch https://raw.githubusercontent.com/m-ab-s/mabs-patches/master/libheif/0001-Edit-CMakeLists.patch
 
     extracflags=()
-    extracommands=(-DWITH_HEADER_COMPRESSION=ON -DWITH_UNCOMPRESSED_CODEC=ON)
+    extracommands=(-DWITH_HEADER_COMPRESSION=ON -DWITH_UNCOMPRESSED_CODEC=ON -DBUILD_DOCUMENTATION=OFF)
 
     pc_exists "libde265" &&
         extracommands+=(-DWITH_LIBDE265=ON -DWITH_LIBDE265_PLUGIN=OFF) &&
@@ -2923,9 +2936,10 @@ if [[ $cyanrip = y ]]; then
     _deps=(libmusicbrainz5.a libcurl.a)
     _check=(bin-audio/cyanrip.exe)
     if do_vcs "$SOURCE_REPO_CYANRIP"; then
+        do_patch "https://raw.githubusercontent.com/m-ab-s/mabs-patches/master/cyanrip/0001-os_compat-re-add-cast-for-gcc-15-compat.patch" am
         old_PKG_CONFIG_PATH=$PKG_CONFIG_PATH
         _check=("$LOCALDESTDIR"/opt/cyanffmpeg/lib/pkgconfig/libav{codec,format}.pc)
-        if flavor=cyan do_vcs "$ffmpegPath"; then
+        if flavor=cyan do_vcs "$ffmpegPath" ffmpeg; then
             do_uninstall "$LOCALDESTDIR"/opt/cyanffmpeg
             [[ -f config.mak ]] && log "distclean" make distclean
             mapfile -t cyan_ffmpeg_opts < <(

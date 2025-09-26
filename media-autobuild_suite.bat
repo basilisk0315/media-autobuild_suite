@@ -110,14 +110,14 @@ set ffmpeg_options_builtin=--disable-autodetect amf bzlib cuda cuvid d3d12va d3d
 iconv lzma nvenc schannel zlib sdl2 ffnvcodec nvdec cuda-llvm
 
 :: common external libs
-set ffmpeg_options_basic=gmp libmp3lame libopus libvorbis libvpx libx264 libx265 ^
+set ffmpeg_options_basic=gmp gpl libmp3lame libopus libvorbis libvpx libx264 libx265 ^
 libdav1d libaom --disable-debug libfdk-aac
 
 :: options used in zeranoe builds and not present above
 set ffmpeg_options_zeranoe=fontconfig gnutls libass libbluray libfreetype ^
 libharfbuzz libvpl libmysofa libopencore-amrnb libopencore-amrwb libopenjpeg libsnappy ^
 libsoxr libspeex libtheora libtwolame libvidstab libvo-amrwbenc ^
-libwebp libxml2 libzimg libshine gpl openssl libtls avisynth #mbedtls libxvid ^
+libwebp libxml2 libzimg libshine openssl libtls avisynth #mbedtls libxvid ^
 libopenmpt version3 librav1e libsrt libgsm libvmaf libsvtav1
 
 :: options also available with the suite
@@ -125,10 +125,10 @@ set ffmpeg_options_full=chromaprint decklink frei0r libaribb24 libbs2b libcaca ^
 libcdio libflite libfribidi libgme libilbc libsvthevc ^
 libsvtvp9 libkvazaar libmodplug librist librtmp librubberband #libssh ^
 libtesseract libxavs libzmq libzvbi openal libcodec2 ladspa #vapoursynth #liblensfun ^
-libglslang vulkan libdavs2 libxavs2 libuavs3d libplacebo libjxl libvvenc libvvdec liblc3
+libglslang vulkan libdavs2 libxavs2 libuavs3d libplacebo libjxl libvvenc libvvdec liblc3 audiotoolbox
 
 :: options also available with the suite that add shared dependencies
-set ffmpeg_options_full_shared=opencl opengl cuda-nvcc libnpp libopenh264
+set ffmpeg_options_full_shared=opencl opengl cuda-nvcc libopenh264
 
 :: built-ins
 set mpv_options_builtin="#-Dcplayer=true" #manpage-build #lua #javascript ^
@@ -143,10 +143,11 @@ set mpv_options_full=dvdnav cdda #egl-angle #html-build ^
 #pdf-build openal sdl2 #sdl2-gamepad #sdl2-audio #sdl2-video
 
 set iniOptions=arch license2 vpx2 x2643 x2652 other265 flac fdkaac mediainfo ^
-soxB ffmpegB2 ffmpegUpdate ffmpegChoice mp4box rtmpdump mplayer2 mpv cores deleteSource ^
-strip pack logging bmx standalone updateSuite av1an aom faac exhale ffmbc curl cyanrip2 ^
-rav1e ripgrep dav1d libavif libheif vvc uvg266 jq dssim gifski avs2 dovitool hdr10plustool timeStamp ^
-noMintty ccache svthevc svtav1 svtvp9 xvc jo vlc CC jpegxl vvenc vvdec zlib ffmpegPath pkgUpdateTime
+soxB ffmpegB2 ffmpegUpdate ffmpegChoice ffmpegKeepLegacyOpts mp4box rtmpdump mplayer2 mpv ^
+cores deleteSource strip pack logging bmx standalone updateSuite av1an aom faac exhale ffmbc ^
+curl cyanrip2 rav1e ripgrep dav1d libavif libheif vvc uvg266 jq dssim gifski avs2 dovitool ^
+hdr10plustool timeStamp noMintty ccache svthevc svtav1 svtvp9 xvc jo vlc CC jpegxl vvenc vvdec ^
+zlib ffmpegPath pkgUpdateTime
 @rem re-add autouploadlogs if we find some way to upload to github directly instead
 
 set deleteIni=0
@@ -264,14 +265,12 @@ if [0]==[%av1anINI%] (
     echo -------------------------------------------------------------------------------
     echo.
     echo. Build Av1an [Scalable video encoding framework]?
-    echo. 1 = Yes [link with static FFmpeg]
-    echo. 2 = Yes [link with shared FFmpeg]
-    echo. 3 = No
+    echo. 1 = Yes
+    echo. 2 = No
     echo.
     echo. Av1an requires local installed copies of Python and Vapoursynth,
-    echo. an executable of FFmpeg and one of these encoders to function:
+    echo. an executable of FFmpeg and FFprobe, and one of these encoders to function:
     echo. aom, SVT-AV1, rav1e, vpx, x264, or x265
-    echo. If FFmpeg is built shared, then the Av1an executable will be in a subfolder.
     echo. (Note: Not available for 32-bit due to Vapoursynth being broken in 32-bit!^)
     echo.
     echo -------------------------------------------------------------------------------
@@ -281,9 +280,8 @@ if [0]==[%av1anINI%] (
 
 if "%buildav1an%"=="" GOTO av1an
 if %buildav1an%==1 set "av1an=y"
-if %buildav1an%==2 set "av1an=shared"
-if %buildav1an%==3 set "av1an=n"
-if %buildav1an% GTR 3 GOTO av1an
+if %buildav1an%==2 set "av1an=n"
+if %buildav1an% GTR 2 GOTO av1an
 if %deleteINI%==1 echo.av1an=^%buildav1an%>>%ini%
 
 :vpx
@@ -409,8 +407,10 @@ if [0]==[%libheifINI%] (
     echo.
     echo. Will use available encoders and decoders supported by libheif.
     echo. If not found, built libheif will lack the corresponding encode/decode ability.
-    echo. Additionally libde265 will be built.
-    echo. dec265 of libde265 being built depends on "standalone=y" and is always static.
+    echo.
+    echo. Additionally libde265 will always be built.
+    echo. dec265 executable from libde265 being built depends on "standalone=y"
+    echo. and is always static.
     echo.
     echo -------------------------------------------------------------------------------
     echo -------------------------------------------------------------------------------
@@ -836,7 +836,7 @@ if [0]==[%ffmpegB2INI%] (
     echo. dependees are enabled.
     echo. Option 6 produces static and shared ffmpeg and ffmpeg libs where the static
     echo. one includes only strictly static dependencies (opencl, opengl, cuda-nvcc,
-    echo. libnpp, libopenh264 are hard disabled.^)
+    echo. libopenh264 are hard disabled.^)
     echo.
     echo -------------------------------------------------------------------------------
     echo -------------------------------------------------------------------------------
@@ -1688,6 +1688,11 @@ if [0]==[%pkgUpdateTimeINI%] (
 ) else set pkgUpdateTime=%pkgUpdateTimeINI%
 if %deleteINI%==1 echo.pkgUpdateTime=^%pkgUpdateTime%>>%ini%
 
+rem ffmpegKeepLegacyOpts
+if %ffmpegKeepLegacyOptsINI%==0 set ffmpegKeepLegacyOpts=n
+if %ffmpegKeepLegacyOptsINI%==1 set ffmpegKeepLegacyOpts=y
+if %deleteINI%==1 echo.ffmpegKeepLegacyOpts=^%ffmpegKeepLegacyOptsINI%>>%ini%
+
 if %build32%==yes (
     if %CC%==clang (
         echo ----------------------------------------------------------------------
@@ -1986,7 +1991,7 @@ endlocal & (
 set compileArgs=--cpuCount=%cpuCount% --build32=%build32% --build64=%build64% ^
 --deleteSource=%deleteSource% --mp4box=%mp4box% --vpx=%vpx2% --x264=%x2643% --x265=%x2652% ^
 --other265=%other265% --flac=%flac% --fdkaac=%fdkaac% --mediainfo=%mediainfo% --sox=%sox% ^
---ffmpeg=%ffmpeg% --ffmpegUpdate=%ffmpegUpdate% --ffmpegChoice=%ffmpegChoice% --mplayer=%mplayer% ^
+--ffmpeg=%ffmpeg% --ffmpegUpdate=%ffmpegUpdate% --ffmpegChoice=%ffmpegChoice% --ffmpegKeepLegacyOpts=%ffmpegKeepLegacyOpts% --mplayer=%mplayer% ^
 --mpv=%mpv% --license=%license2%  --stripping=%stripFile% --packing=%packFile% --rtmpdump=%rtmpdump% ^
 --logging=%logging% --bmx=%bmx% --standalone=%standalone% --aom=%aom% --faac=%faac% --exhale=%exhale% ^
 --ffmbc=%ffmbc% --curl=%curl% --cyanrip=%cyanrip% --rav1e=%rav1e% --ripgrep=%ripgrep% --dav1d=%dav1d% ^

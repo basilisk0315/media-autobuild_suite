@@ -149,7 +149,7 @@ vcs_test_remote() {
 vcs_clean() {
     GIT_TERMINAL_PROMPT=0 \
         git -C "${1:-$PWD}" clean -dffxq \
-        -e{recently_{updated,checked},build_successful*,*.{patch,diff},custom_updated,**/ab-suite.*.log} "$@"
+        -e{recently_{updated,checked},build_successful*,*.{patch,diff},custom_updated,do_not_build,**/ab-suite.*.log} "$@"
 }
 
 # vcs_get_latest_tag "libopenmpt-*"
@@ -927,10 +927,12 @@ do_getFFmpegConfig() {
         do_addOption --enable-schannel
     fi
 
-    enabled_any lib{vo-aacenc,aacplus,utvideo,dcadec,faac,ebur128,ndi_newtek,ndi-newtek,ssh,wavpack} netcdf &&
-        do_removeOption "--enable-(lib(vo-aacenc|aacplus|utvideo|dcadec|faac|ebur128|ndi_newtek|ndi-newtek|ssh|wavpack)|netcdf)" &&
-        sed -ri 's;--enable-(lib(vo-aacenc|aacplus|utvideo|dcadec|faac|ebur128|ndi_newtek|ndi-newtek|ssh|wavpack)|netcdf);;g' \
-            "$LOCALBUILDDIR/ffmpeg_options.txt"
+    if [[ $ffmpegKeepLegacyOpts == n ]]; then
+        enabled_any lib{vo-aacenc,aacplus,utvideo,dcadec,faac,ebur128,ndi_newtek,ndi-newtek,npp,ssh,wavpack} netcdf &&
+            do_removeOption "--enable-(lib(vo-aacenc|aacplus|utvideo|dcadec|faac|ebur128|ndi_newtek|ndi-newtek|npp|ssh|wavpack)|netcdf)" &&
+            sed -ri 's;--enable-(lib(vo-aacenc|aacplus|utvideo|dcadec|faac|ebur128|ndi_newtek|ndi-newtek|npp|ssh|wavpack)|netcdf);;g' \
+                "$LOCALBUILDDIR/ffmpeg_options.txt"
+    fi
 }
 
 do_changeFFmpegConfig() {
@@ -1268,6 +1270,9 @@ do_patch() {
         [[ ${patch%/*} != "$PWD" ]] && cp -f "$patch" "$patchName" > /dev/null 2>&1
     fi
 
+    [[ -f "$(get_first_subdir -f)/do_not_patch" ]] &&
+        return
+
     if [[ -f $patchName ]]; then
         if $am; then
             git apply -3 --check --ignore-space-change --ignore-whitespace "$patchName" > /dev/null 2>&1 &&
@@ -1512,11 +1517,13 @@ zip_logs() {
 }
 
 log() {
-    local errorOut=true quiet=false ret OPTION OPTIND
-    while getopts ':qe' OPTION; do
+    local errorOut=true quiet=false noRunning=false dontPrint=true ret OPTION OPTIND
+    while getopts ':qenp' OPTION; do
         case "$OPTION" in
         e) errorOut=false ;;
         q) quiet=true ;;
+        n) noRunning=true ;;
+        p) dontPrint=false ;;
         *) break ;;
         esac
     done
@@ -1525,13 +1532,18 @@ log() {
     [[ $1 == quiet ]] && quiet=true && shift # Temp compat with old style just in case
     local name="${1// /.}" _cmd="$2" extra
     shift 2
-    $quiet || do_print_progress Running "$name"
+    $quiet || $noRunning || do_print_progress Running "$name"
     [[ $_cmd =~ ^(make|ninja)$ ]] && extra="-j$cpuCount"
 
     if [[ $logging == "y" ]]; then
         printf 'CPPFLAGS: %s\nCFLAGS: %s\nCXXFLAGS: %s\nLDFLAGS: %s\n%s %s\n' "$CPPFLAGS" "$CFLAGS" "$CXXFLAGS" "$LDFLAGS" "$_cmd${extra:+ $extra}" "$*" > "ab-suite.$name.log"
-        $_cmd $extra "$@" >> "ab-suite.$name.log" 2>&1 ||
-            { [[ $extra ]] && $_cmd -j1 "$@" >> "ab-suite.$name.log" 2>&1; }
+        if $dontPrint; then
+            $_cmd $extra "$@" >> "ab-suite.$name.log" 2>&1 ||
+                { [[ $extra ]] && $_cmd -j1 "$@" >> "ab-suite.$name.log" 2>&1; }
+        else
+            { $_cmd $extra "$@" 2>&1 || { [[ $extra ]] && $_cmd -j1 "$@" 2>&1; } } \
+                | tee -a "ab-suite.$name.log"
+        fi
     else
         $_cmd $extra "$@" || { [[ $extra ]] && $_cmd -j1 "$@"; }
     fi
@@ -2376,12 +2388,12 @@ extra_script() {
         type "_${stage}_build" > /dev/null 2>&1; then
         pushd "${REPO_DIR}" > /dev/null 2>&1 || true
         do_print_progress "Running ${stage} build from ${vcsFolder}_extra.sh"
-        log -q "${stage}_build" "_${stage}_build"
+        log -n -p "${stage}_build" "_${stage}_build"
         popd > /dev/null 2>&1 || true
     elif type "_${stage}_${commandname}" > /dev/null 2>&1; then
         pushd "${REPO_DIR}" > /dev/null 2>&1 || true
         do_print_progress "Running ${stage} ${commandname} from ${vcsFolder}_extra.sh"
-        log -q "${stage}_${commandname}" "_${stage}_${commandname}"
+        log -n -p "${stage}_${commandname}" "_${stage}_${commandname}"
         popd > /dev/null 2>&1 || true
     fi
 }
@@ -2477,6 +2489,10 @@ create_extra_skeleton() {
 _pre_vcs() {
     # ref changes the branch/commit/tag that you want to clone
     ref=research
+
+    # Bypasses any patches that the suite applies, they will still get downloaded in case they want to be patched in some other form
+    # You need to delete the file again if you want to patch something yourself!
+    #touch "$(get_first_subdir -f)/do_not_patch"
 }
 
 # Commands to run before and after running cmake (do_cmake)
@@ -2632,6 +2648,7 @@ safe_git_clean() {
         -e "/build_successful*" \
         -e "/recently_updated" \
         -e '/custom_updated' \
+        -e '/do_not_build' \
         -e '**/ab-suite.*.log' \
         "${@}"
 }
